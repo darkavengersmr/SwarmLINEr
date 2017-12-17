@@ -1,0 +1,237 @@
+//иницилизируем переменные
+float nostalgia =0.25;
+float confidence=0.75;
+int pok=1;
+int agents=10;
+byte fh;
+int msg_len;
+string logstr;
+float max_speed;
+//создаЄм шаблон агента
+struct agent
+{
+  //скорость и коэффициенты
+  float speed;
+  float Kp;
+  float Ki;
+  float Kd;
+  //скорости изменени€ скорости и коэффициентов
+  float change_speed;
+  float change_Kp;
+  float change_Ki;
+  float change_Kd;
+  //лучша€ скорость и коэффициенты
+  float best_Kp;
+  float best_Ki;
+  float best_Kd;
+  float best_speed;
+  //лучший пройденный путь агентом
+  long best_path;
+  //последний пройденный путь агентом
+  long path;
+};
+//создаем рабочих агентов
+agent robot[10];
+//агент хран€щий самые лучшие значени€ (решение задачи)
+agent best;
+//функци€ дл€ возрата на линию использу€ PID регул€тор
+void go_to_line(){
+  int B=0;
+  int C=0;
+  float P=1.009;
+  float D=1.041;
+  float ERRo=0;
+  float ERR=0;
+  float u=0;
+  while(abs(Sensor(IN_2)-Sensor(IN_3))>5){
+    int ERR=Sensor(IN_3)-Sensor(IN_2);
+    int u=P*ERR+D*(ERR-ERRo);
+    int z1=-u;
+    int z2=+u;
+    if(-u>100)z1=100;
+    if(-u<-100)z1=-100;
+    if(+u>100)z2=100;
+    if(+u<-100)z2=-100;
+    OnFwd(OUT_B,z1);
+    OnFwd(OUT_C,z2);
+  }
+}
+
+//функци€ дл€ испытани€ агента в течении заданного времени или пока робот не слетит с трассы в этом случае возращаемс€ на линию
+long pid(float Pk,float Ik,float Dk,int speed,long ti){
+  long B=0;
+  long C=0;
+  long path=0;
+  long MC=MotorRotationCount(OUT_C);
+  long MB=MotorRotationCount(OUT_B);
+  long e = 0;
+  int porog23=45;
+  int porog14=20;
+  float ERRo=0;
+  float ERR=0;
+  float u=0;
+  int z1=0;
+  int z2=0;
+  long tmp=CurrentTick();
+  float p;
+  float i;
+  float d;
+  while(CurrentTick()-tmp<=ti){
+    MC=MotorRotationCount(OUT_C);
+    MB=MotorRotationCount(OUT_B);
+    ERR=Sensor(IN_3)-Sensor(IN_2);
+    p=Pk*ERR;
+    d=Dk*(ERR-ERRo);
+    i=Ik*e;
+    if(i>10)i=10;
+    if(i<-10)i= -10;
+    u=p+i+d;
+    z1=speed-u;
+    z2=speed+u;
+    if(speed-u>100)z1=100;
+    if(speed-u<-100)z1=-100;
+    if(speed+u>100)z2=100;
+    if(speed+u<-100)z2=-100;
+    OnFwd(OUT_B,z1);
+    OnFwd(OUT_C,z2);
+    if(Sensor(IN_1)<=porog14){
+      Off(OUT_BC);
+      OnFwd(OUT_B,-15);
+      OnFwd(OUT_C,15);
+      while(Sensor(IN_3)>porog23);
+      Off(OUT_BC);
+      PlayTone(TONE_C5, MS_500);
+      go_to_line();
+      path=path/10.0;
+      break;
+    }
+    if(Sensor(IN_4)<=porog14){
+      Off(OUT_BC);
+      OnFwd(OUT_C,-15);
+      OnFwd(OUT_B,15);
+      while(Sensor(IN_2)>porog23);
+      Off(OUT_BC);
+      PlayTone(TONE_C5, MS_500);
+      go_to_line();
+      path=path/10.0;
+      break;
+    }
+    ERRo=ERR;
+    e+=ERR;
+    //высчитываем пройденный агентом путь
+    B=MotorRotationCount(OUT_B)-MB;
+    C=MotorRotationCount(OUT_C)-MC;
+    if(B>0 && C>0){
+      if(B<C){
+        path+=B;
+      }
+      else{
+        path+=C;
+      }
+    }
+  }
+  Off(OUT_BC);
+  return path;
+}
+//функци€ дл€ создани€ агента
+agent born(){
+  agent tmp;
+  tmp.speed = Random(70)+30;
+  tmp.Kp = Random(3000)/1000.0;
+  tmp.Ki= Random(10000)/100000.0;
+  tmp.Kd= Random(6000)/1000.0;
+  tmp.change_speed=(Random(4000)-2000)/1000.0;
+  tmp.change_Kp=(Random(2000)-1500)/10000.0;
+  tmp.change_Ki=(Random(1000)-500)/100000.0;
+  tmp.change_Kd=(Random(6000)-2000)/10000.0;
+  tmp.path = 0;
+  tmp.best_path=0;
+  return tmp;
+}
+task main(){
+  best.path=0;
+  best.Kp=0;
+  best.Ki=0;
+  best.Kd=0;
+  best.speed=0;
+  //удал€ем и создаЄм файл
+  DeleteFile("evolution.csv");
+  CreateFile("evolution.csv", 4096, fh);
+  //иницилизируем датчики
+  SetSensorLight(IN_2);
+  SetSensorLight(IN_3);
+  SetSensorColorBlue(IN_1);
+  SetSensorColorBlue(IN_4);
+  //создаЄм начальное распределение агентов
+  for(int i=0;i<agents;i++){
+    robot[i]=born();
+  }
+  //основной цикл работает 10 раз
+  long z=1;
+  while(true){
+    z++;
+    if(z>10){
+      break;
+    }
+    PlayFile("new_i.rso");
+    //даЄм испытание каждому агенту, запоминаем если находим более лучший результат
+    for (int i=0;i<agents;i++){
+      robot[i].path = pid(robot[i].Kp,robot[i].Ki,robot[i].Kd,robot[i].speed,2000);
+      if(robot[i].path>best.path){
+        PlayFile("best.rso");
+        logstr =NumToStr(pok)+ ";"+NumToStr(best.Kp)+";" +NumToStr(best.Ki)+";" +NumToStr(best.Kd)+";" +NumToStr(best.speed)+";"+NumToStr(best.path);
+        msg_len = StrLen(logstr);
+        WriteLnString(fh, logstr, msg_len);
+        best.path=robot[i].path;
+        best.speed=robot[i].speed;
+        best.Kp=robot[i].Kp;
+        best.Ki=robot[i].Ki;
+        best.Kd=robot[i].Kd;
+      }
+      if(robot[i].path>robot[i].best_path){
+        robot[i].best_path=robot[i].path;
+        robot[i].best_speed=robot[i].speed;
+        robot[i].best_Kp=robot[i].Kp;
+        robot[i].best_Ki=robot[i].Ki;
+        robot[i].best_Kd=robot[i].Kd;
+      }
+      PlayTone(TONE_A4, MS_500);
+      //высчитываем скорости изменнени€ параметров и их новые значени€
+      robot[i].change_Kp = robot[i].change_Kp+nostalgia * (Random(1000)/1000.0)
+                           * (robot[i].best_Kp-robot[i].Kp)
+                           + confidence*(Random(1000)/1000.0)
+                           * (best.Kp-robot[i].Kp);
+      robot[i].Kp=robot[i].Kp+robot[i].change_Kp;
+
+      robot[i].change_Ki = robot[i].change_Ki+nostalgia * (Random(1000)/1000.0)
+                           * (robot[i].best_Ki-robot[i].Ki)
+                           + confidence*(Random(1000)/1000.0)
+                           * (best.Ki-robot[i].Ki);
+      robot[i].Ki=robot[i].Ki+robot[i].change_Ki;
+
+      robot[i].change_Kd = robot[i].change_Kd+nostalgia * (Random(1000)/1000.0)
+                           * (robot[i].best_Kd-robot[i].Kd)
+                           + confidence*(Random(1000)/1000.0)
+                           * (best.Kd-robot[i].Kd);
+      robot[i].Kd=robot[i].Kd+robot[i].change_Kd;
+
+      robot[i].change_speed = robot[i].change_speed+nostalgia * (Random(1000)/1000.0)
+                           * (robot[i].best_speed-robot[i].speed)
+                           + confidence*(Random(1000)/1000.0)
+                           * (best.speed-robot[i].speed);
+      robot[i].speed=robot[i].speed+robot[i].change_speed;
+      //если поиск вышел за пределы территории
+      if(robot[i].Kp<=0 || robot[i].Kp>=3 ||
+         robot[i].speed<=0 || robot[i].speed>100 ||
+         robot[i].Ki<=0 || robot[i].Ki>0.1 ||
+         robot[i].Kd<=0 || robot[i].Kd>6){
+        robot[i]=born();
+        PlayFile("new_a.rso");
+      }
+    }
+    pok+=1;
+  }
+  // показываем найденное решение
+  z=pid(best.Kp,best.Ki,best.Kd,best.speed,100000);
+
+}
